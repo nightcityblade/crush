@@ -159,6 +159,33 @@ Flags:
       --extra-header key value      add an HTTP header (repeatable)
       --extra-body JSON             merge a JSON object into request bodies
       --provider-options JSON       merge a provider-specific JSON object
+      --oauth-kind string           oauth or api_key (default oauth)
+      --oauth-flow string           auto, browser, or device (default auto)
+      --oauth-issuer URL            authorization server to discover endpoints from
+      --oauth-client-id string      OAuth client ID
+      --oauth-client-secret string  OAuth client secret (confidential clients)
+      --oauth-scope string          request a scope (repeatable)
+      --oauth-auth-url URL          authorization endpoint
+      --oauth-token-url URL         token endpoint
+      --oauth-device-url URL        device authorization endpoint (RFC 8628)
+      --oauth-redirect-uri URI      loopback redirect URI the server registered
+      --oauth-callback-port int     loopback port for the browser flow
+      --oauth-param key value       extra authorization parameter (repeatable)
+      --oauth-secret-basic bool     send the client secret with HTTP Basic auth
+      --usage-url URL               endpoint reporting the quota left
+      --usage-method string         HTTP method for the quota call (default GET)
+      --usage-body JSON             request body for the quota call (default {})
+      --usage-groups PATH           gjson path to the groups holding meters
+      --usage-group-label string    field naming each group (default displayName)
+      --usage-meters PATH           gjson path to the meters (default buckets)
+      --usage-label string          field naming each meter (default displayName)
+      --usage-remaining string      field with the fraction or amount left
+      --usage-reset string          field with the RFC 3339 reset time
+      --usage-title string          label for a meter that carries none
+      --usage-window string         field with a short meter tag (default window)
+      --usage-model-group PREFIX GROUP  model id prefix to group (repeatable)
+      --gateway-request JQ          jq program rewriting each request
+      --gateway-response JQ         jq program rewriting each response
 ```
 
 ```bash
@@ -188,6 +215,194 @@ Usage:
   provider remove <id>
   provider rm <id>
 ```
+
+#### OAuth providers
+
+A provider authenticates with `--api-key` unless the `--oauth-*` flags
+declare a flow. Any `--oauth-*` flag marks the provider as one that signs
+in, which is what makes `crush login <id>` work for a provider Crush does
+not ship:
+
+```bash
+provider add example \
+  --type openai-compat \
+  --base-url "https://api.example.com/v1" \
+  --oauth-issuer "https://auth.example.com" \
+  --oauth-client-id crush \
+  --oauth-scope openid \
+  --oauth-scope offline_access
+```
+
+Endpoints left blank are discovered from the issuer's well-known documents
+(RFC 8414). The browser flow (authorization code with PKCE and a loopback
+redirect) is the default, falling back to the device flow (RFC 8628) when no
+callback can be served — or pin it with `--oauth-flow device`. Tokens are
+persisted and refreshed like the built-in subscription providers, and the
+models the credential unlocks are discovered once the sign-in lands.
+
+Servers that need a fixed redirect, nonstandard endpoints, or an extra
+parameter such as `audience` are covered by `--oauth-redirect-uri`,
+`--oauth-auth-url`/`--oauth-token-url`/`--oauth-device-url`, and
+`--oauth-param`. Confidential clients whose server expects HTTP Basic auth
+set `--oauth-secret-basic true`.
+
+The equivalent JSON lives under the provider's `auth` object:
+
+```json
+{
+  "providers": {
+    "example": {
+      "type": "openai-compat",
+      "base_url": "https://api.example.com/v1",
+      "auth": {
+        "issuer": "https://auth.example.com",
+        "client_id": "crush",
+        "scopes": ["openid", "offline_access"]
+      }
+    }
+  }
+}
+```
+
+#### Remaining quota
+
+A plan that reports how much allowance is left can be read without any Crush
+code: declare where the report lives, and `crush usage` prints it.
+
+```bash
+provider add example \
+  --usage-url "https://api.example.com/v1/remaining-quota" \
+  --usage-method POST \
+  --usage-groups groups
+```
+
+```text
+$ crush usage
+Google AI Subscription
+  Gemini Models · Weekly Limit Remaining: 99% left · resets in 6d 22h
+  Gemini Models · Five Hour Limit Remaining: 99% left · resets in 3h 57m
+```
+
+The response is walked with [gjson](https://github.com/tidwall/gjson) paths.
+`--usage-groups` names the groups holding the meters (each contributing a
+label), `--usage-meters` names the meters inside them, and `--usage-label` /
+`--usage-remaining` / `--usage-reset` name the fields within each meter.
+Those three default to `displayName`, `remainingFraction`, and `resetTime`,
+and `--usage-meters` defaults to `buckets`, so the declaration above needs
+nothing else. For a response that is a single flat value, set
+`--usage-meters .` and name the field with `--usage-remaining`;
+`--usage-title` labels it. `--usage-window` names a field carrying a short
+tag for the meter (`5h`, `weekly`), which is what the header shows.
+
+A remaining value of 1 or less is read as a share of the allowance, and
+anything larger as an amount, such as a credit balance. The provider's
+credential (its login token or API key) and `--extra-header` values are sent
+with the request, which matters for gateways that only answer a request
+identifying a supported client.
+
+The same figures appear in the UI while the model is in use: the header
+shows a compact `◆ 5h 99% · weekly 99%` for the current model, and the
+sidebar spells the limits out with their refill times. When a plan reports
+different limits per model family, `--usage-model-group PREFIX GROUP`
+(repeatable) maps a model id to the group its allowance comes from, so the
+display shows the two limits that apply rather than every limit on the plan:
+
+```bash
+provider add example \
+  --usage-url "https://api.example.com/quota" \
+  --usage-groups groups \
+  --usage-model-group gemini "Gemini" \
+  --usage-model-group cld "Claude"
+```
+
+A provider with one plan-wide allowance needs no mapping at all: every meter
+applies. With a mapping declared, a model id it does not cover shows nothing,
+because one family's limits beside another's model reads as a plan being spent
+when it is not.
+
+#### Gateway adapters
+
+Some plans are served by a gateway whose wire format differs from the API the
+SDK speaks: a different envelope, different model naming, a differently framed
+stream. `--gateway-request` and `--gateway-response` declare that translation
+as jq programs, so the provider stays configuration and Crush stays
+provider-blind.
+
+The request program receives
+
+```json
+{"method": "POST", "url": "…", "headers": {}, "body": {}, "request_id": "…", "token": "…"}
+```
+
+and returns any of `url` (the request is re-addressed, and the Host header with
+it), `headers` to set, `drop_headers` to remove, and `body` to replace:
+
+```bash
+provider add example   --type google   --base-url "https://api.example.com/"   --gateway-request '
+      .url as $u | .body as $b | .token as $t | .request_id as $id
+      | {url: ("https://gateway.example.com/v1internal" + ($u | capture(":/(?<v>[a-zA-Z]+)$").v)),
+         headers: {Authorization: ("Bearer " + $t), "Content-Type": "application/json"},
+         drop_headers: ["x-goog-api-key"],
+         body: {model: $b.model, requestId: $id, request: $b}}'   --gateway-response '(.body.response // .body)'
+```
+
+The response program runs once per reply: for a plain body it receives
+`{status, headers, body, request_id, token}` and returns the replacement body;
+for a server-sent event stream it receives `{event: true, status, headers,
+data, final, request_id, token}` and returns an **array** of replacement
+events, which may be empty to drop one or longer to append synthesized ones.
+`final` marks the last event, which means a rewritten stream trails the
+upstream by one event; events whose data is not JSON pass through untouched.
+Both programs are compiled at load time, so a jq typo fails startup with the
+provider named rather than breaking a request later. Adapters are attached to
+`google`-type providers today; declaring one for another type warns at load
+instead of silently doing nothing.
+
+#### Pricing
+
+Crush prices models from the catalog it ships (`catwalk`) and from the
+`--price-input`, `--price-output`, `--price-cache-create`, and
+`--price-cache-hit` flags on `model add`. There is no pricing endpoint to
+fetch from: providers that serve a subscription often publish none at all,
+and their model ids are specific to that plan.
+
+For a subscription, `--flat-rate true` is the accurate setting: Crush then
+skips per-token cost accumulation rather than reporting dollars that were
+never spent. If you still want nominal figures in the UI, declare them
+yourself — a plugin is Bash, so it can fetch a price list and pass the flags:
+
+```bash
+provider add example --flat-rate true --usage-url "https://api.example.com/quota"
+
+# Prices are just configuration: fetch them at load time if you have a source.
+price=$(curl -fsSL "https://example.com/prices/gemini-3.8-flash.json" | jq -r .input)
+model add example/gemini-3.8-flash --name "Gemini 3.8 Flash" --price-input "$price"
+```
+
+### plugins
+
+The builtins above are the plugin format. A plugin is a Bash script that
+runs at config load through the same embedded interpreter, so a provider
+can be added without a Crush release. Two directories are scanned:
+
+- `$XDG_CONFIG_HOME/crush/plugins/` — user-wide
+- `.crush/plugins/` — the working directory's project folder
+
+Every non-hidden `*.sh` file runs in name order. A project plugin overrides
+a global one, and your own crushrc overrides both, so a plugin never traps a
+project. A failing plugin fails the load, exactly like a failing crushrc —
+and like a crushrc, a plugin is trusted code with your shell privileges:
+review it before you install it.
+
+A provider that declares an OAuth flow is a sign-in candidate until
+`crush login <id>` stores its token: it appears in the model picker but is
+not treated as a configured provider, so Crush asks you to authenticate
+rather than selecting it with no credential.
+
+One declared this way can carry any OAuth flow and quota report: for
+instance a Google AI subscription (Antigravity) provider, with Google's
+OAuth client, the gateway's models, and the client secret supplied through
+an environment variable the plugin expands.
 
 ### model
 
@@ -225,6 +440,7 @@ Flags:
       --price-cache-create float    cache-creation price per 1M tokens
       --price-cache-hit float       cache-hit price per 1M tokens
       --reasoning-effort string     low, medium, or high
+      --reasoning-level string      a selectable reasoning tier (repeatable)
 ```
 
 #### `model remove`

@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/lock"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	"github.com/charmbracelet/crush/internal/oauth/generic"
 	"github.com/charmbracelet/crush/internal/oauth/grok"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
 	"github.com/charmbracelet/crush/internal/oauth/openai"
@@ -1072,6 +1073,11 @@ func (s *ConfigStore) exchange(ctx context.Context, providerID, refreshToken str
 	case hyperp.Name:
 		return hyper.ExchangeToken(ctx, refreshToken)
 	default:
+		// A provider declared in config drives its own refresh from the
+		// OAuth block that declared it, so plugins need no code here.
+		if pc, ok := s.Config().Providers.Get(providerID); ok && pc.UsesOAuth() {
+			return generic.RefreshToken(ctx, pc.Auth, refreshToken)
+		}
 		return nil, fmt.Errorf("OAuth refresh not supported for provider %s", providerID)
 	}
 }
@@ -1477,7 +1483,14 @@ func (s *ConfigStore) reloadFromDiskLocked(ctx context.Context) error {
 		} else {
 			cfg.Models[SelectedModelTypeLarge] = resolved.Large
 			cfg.Models[SelectedModelTypeSmall] = resolved.Small
-			s.SetupAgents()
+			// Logging out of the selected provider leaves nothing usable
+			// to build an agent with; the picker still lists its models,
+			// and signing in again completes the setup.
+			if !cfg.HasUsableSelection() {
+				slog.Warn("No signed-in provider after reload, waiting for a sign-in")
+			} else {
+				s.SetupAgents()
+			}
 		}
 	}
 

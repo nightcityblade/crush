@@ -30,6 +30,7 @@ import (
 	"github.com/charmbracelet/crush/internal/discover"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/filetracker"
+	"github.com/charmbracelet/crush/internal/gateway"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/hooks"
 	"github.com/charmbracelet/crush/internal/log"
@@ -408,7 +409,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	// retry means the user doesn't need to re-authenticate. AWS SSO is
 	// handled transparently inside OnAuthRefresh, so it needs no post-run
 	// notification here.
-	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if originalErr != nil && isUnauthorized(originalErr) && c.notify != nil && c.notifiesOnRevokedToken(model.ModelCfg.Provider) {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
@@ -1069,10 +1070,17 @@ func (c *coordinator) hyperAPIKey() string {
 	return config.ResolveHyperAPIKey(c.cfg.Config())
 }
 
-func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
+func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string, token *oauth.Token) (fantasy.Provider, error) {
 	var opts []anthropic.Option
 
 	switch {
+	case token != nil:
+		// A subscription login: the OAuth access token is the credential,
+		// carried as a bearer header, with no API key at all. Sending
+		// x-api-key too would make the API answer 401.
+		// NOTE: Prevent the SDK from picking up the API key from env.
+		os.Setenv("ANTHROPIC_API_KEY", "")
+		headers["Authorization"] = "Bearer " + token.AccessToken
 	case strings.HasPrefix(apiKey, "Bearer "):
 		// NOTE: Prevent the SDK from picking up the API key from env.
 		os.Setenv("ANTHROPIC_API_KEY", "")
@@ -1268,13 +1276,36 @@ func (c *coordinator) buildBedrockProvider(apiKey string, headers map[string]str
 	return bedrock.New(opts...)
 }
 
-func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[string]string) (fantasy.Provider, error) {
+func (c *coordinator) buildGoogleProvider(baseURL, apiKey string, headers map[string]string, providerCfg config.ProviderConfig) (fantasy.Provider, error) {
 	opts := []google.Option{
 		google.WithBaseURL(baseURL),
 		google.WithGeminiAPIKey(apiKey),
 	}
+	var httpClient *http.Client
 	if c.cfg.Config().Options.Debug {
-		httpClient := log.NewHTTPClient()
+		httpClient = log.NewHTTPClient()
+	}
+	if providerCfg.Gateway != nil {
+		// The provider declares that its traffic needs rewriting, so the
+		// adapter sits under the client and sees the requests the SDK built.
+		token := apiKey
+		if providerCfg.OAuthToken != nil {
+			token = providerCfg.OAuthToken.AccessToken
+		}
+		var base http.RoundTripper
+		if httpClient != nil {
+			base = httpClient.Transport
+		}
+		adapter, err := gateway.New(providerCfg.Gateway, token, base)
+		if err != nil {
+			return nil, fmt.Errorf("gateway adapter for provider %s: %w", providerCfg.ID, err)
+		}
+		if httpClient == nil {
+			httpClient = &http.Client{}
+		}
+		httpClient.Transport = adapter
+	}
+	if httpClient != nil {
 		opts = append(opts, google.WithHTTPClient(httpClient))
 	}
 	if len(headers) > 0 {
@@ -1299,6 +1330,18 @@ func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, optio
 	opts = append(opts, google.WithVertex(project, location))
 
 	return google.New(opts...)
+}
+
+// notifiesOnRevokedToken reports whether a provider should ask the user to
+// sign in again once its OAuth token stops working: the ones Crush knows and
+// any provider that declares its own login, which has no recovery path other
+// than re-authenticating.
+func (c *coordinator) notifiesOnRevokedToken(providerID string) bool {
+	if providerID == hyper.Name {
+		return true
+	}
+	pc, ok := c.cfg.Config().Providers.Get(providerID)
+	return ok && pc.UsesOAuth()
 }
 
 func (c *coordinator) isAnthropicThinking(model config.SelectedModel) bool {
@@ -1331,7 +1374,7 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	case string(catwalk.InferenceProviderOpenCodeGo), string(catwalk.InferenceProviderOpenCodeZen):
 		if isOpenCodeMessagesModel(providerCfg.ID, model.Model) {
 			baseURL = strings.TrimSuffix(baseURL, "/v1")
-			return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID)
+			return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, nil)
 		}
 	}
 
@@ -1350,7 +1393,14 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 		}
 		return c.buildOpenaiProvider(baseURL, apiKey, headers, token)
 	case anthropic.Name:
-		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID)
+		// A provider that declares its own OAuth flow authenticates with the
+		// login's bearer token rather than an API key; Claude Pro and Max
+		// subscriptions work this way.
+		var token *oauth.Token
+		if providerCfg.UsesOAuth() {
+			token = providerCfg.OAuthToken
+		}
+		return c.buildAnthropicProvider(baseURL, apiKey, headers, providerCfg.ID, token)
 	case openrouter.Name:
 		return c.buildOpenrouterProvider(baseURL, apiKey, headers)
 	case vercel.Name:
@@ -1360,7 +1410,7 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	case bedrock.Name:
 		return c.buildBedrockProvider(apiKey, headers, providerCfg.ID)
 	case google.Name:
-		return c.buildGoogleProvider(baseURL, apiKey, headers)
+		return c.buildGoogleProvider(baseURL, apiKey, headers, providerCfg)
 	case "google-vertex":
 		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams)
 	case openaicompat.Name, hyper.Name:
@@ -1695,7 +1745,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 	result, err := run()
 	// Notify only if still unauthorized after retry. AWS SSO is handled
 	// transparently inside OnAuthRefresh, so it needs no post-run notice.
-	if err != nil && isUnauthorized(err) && c.notify != nil && model.ModelCfg.Provider == hyper.Name {
+	if err != nil && isUnauthorized(err) && c.notify != nil && c.notifiesOnRevokedToken(model.ModelCfg.Provider) {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
 			Type:       notify.TypeReAuthenticate,
 			ProviderID: model.ModelCfg.Provider,
