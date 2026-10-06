@@ -426,6 +426,10 @@ type authFlight struct {
 	once   sync.Once
 	result *auth.AuthorizationResult
 	err    error
+
+	// joined counts callers that attached to this flight instead of
+	// opening their own tab. Guarded by the receiver's mu.
+	joined int
 }
 
 // settle records the outcome of the flight and wakes everyone waiting on
@@ -447,6 +451,7 @@ func (r *callbackReceiver) begin() (*authFlight, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.flight != nil {
+		r.flight.joined++
 		return r.flight, false, nil
 	}
 	if err := r.bindLocked(); err != nil {
