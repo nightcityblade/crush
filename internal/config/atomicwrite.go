@@ -38,22 +38,36 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// renameRetryBudget bounds how long renameFile keeps retrying transient
-// failures before giving up and returning the error.
-const renameRetryBudget = 2 * time.Second
+// transientRetryBudget bounds how long a transient failure is retried.
+const transientRetryBudget = 2 * time.Second
 
 // renameFile renames tmp over path. On Windows the rename fails with
 // ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION while another process
 // (antivirus, search indexer) or a concurrent reader briefly holds a
-// handle on the destination, so transient failures are retried with
-// backoff. On other platforms isTransientRenameError is always false
-// and this is a plain os.Rename.
+// handle on the destination, so transient failures are retried.
 func renameFile(tmp, path string) error {
+	return retryTransient(func() error { return os.Rename(tmp, path) })
+}
+
+// readFile is os.ReadFile, retried while Windows briefly locks the file
+// (another writer's renameFile, antivirus, the search indexer).
+func readFile(path string) ([]byte, error) {
+	var data []byte
+	err := retryTransient(func() (err error) {
+		data, err = os.ReadFile(path)
+		return err
+	})
+	return data, err
+}
+
+// retryTransient runs op with backoff until it succeeds, fails with a
+// non-transient error, or transientRetryBudget is spent.
+func retryTransient(op func() error) error {
 	var slept time.Duration
 	delay := time.Millisecond
 	for {
-		err := os.Rename(tmp, path)
-		if err == nil || !isTransientRenameError(err) || slept >= renameRetryBudget {
+		err := op()
+		if err == nil || !isTransientFileError(err) || slept >= transientRetryBudget {
 			return err
 		}
 		time.Sleep(delay)

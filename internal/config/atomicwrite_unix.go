@@ -2,6 +2,6 @@
 
 package config
 
-// isTransientRenameError reports whether err is a rename failure that
-// can resolve on its own. Only Windows has such failures.
-func isTransientRenameError(error) bool { return false }
+// isTransientFileError reports whether err is a file failure that can
+// resolve on its own. Only Windows has such failures.
+func isTransientFileError(error) bool { return false }

@@ -64,7 +64,7 @@ func Load(workingDir, dataDir string, debug bool) (*ConfigStore, error) {
 	}
 
 	// Load workspace config last so it has highest priority.
-	if wsData, err := os.ReadFile(store.workspacePath); err == nil && len(wsData) > 0 {
+	if wsData, err := readFile(store.workspacePath); err == nil && len(wsData) > 0 {
 		if !json.Valid(wsData) {
 			return nil, fmt.Errorf("invalid JSON in config file %s", store.workspacePath)
 		}
@@ -992,7 +992,7 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 		if path == "" {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue

@@ -8,11 +8,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// isTransientRenameError reports whether err is a Windows rename
-// failure that can resolve on its own: replacing the destination fails
-// while another handle (a concurrent reader, antivirus, or the search
-// indexer) is briefly open on it without FILE_SHARE_DELETE.
-func isTransientRenameError(err error) bool {
+// isTransientFileError reports whether err is a Windows file failure
+// that clears once another handle (a concurrent reader or writer,
+// antivirus, or the search indexer) briefly open on the file closes.
+func isTransientFileError(err error) bool {
 	return errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
 		errors.Is(err, windows.ERROR_SHARING_VIOLATION)
 }
