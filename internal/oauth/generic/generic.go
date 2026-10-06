@@ -167,10 +167,14 @@ func RefreshToken(ctx context.Context, spec *oauth.AuthSpec, refreshToken string
 	if err != nil {
 		return nil, err
 	}
-	token, err := requestToken(ctx, spec, endpoints.TokenURL, url.Values{
+	vals := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {refreshToken},
-	})
+	}
+	if spec.UsesJSONToken() && len(spec.Scopes) > 0 {
+		vals.Set("scope", strings.Join(spec.Scopes, " "))
+	}
+	token, err := requestToken(ctx, spec, endpoints.TokenURL, vals)
 	if err != nil {
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
@@ -180,18 +184,24 @@ func RefreshToken(ctx context.Context, spec *oauth.AuthSpec, refreshToken string
 	return token, nil
 }
 
-// ExchangeCode trades an authorization code for tokens.
+// ExchangeCode trades an authorization code for tokens. The state the flow
+// generated is included when the token endpoint takes JSON: the servers
+// behind that shape, Anthropic among them, require it.
 func ExchangeCode(
 	ctx context.Context,
 	spec *oauth.AuthSpec,
-	tokenURL, code, redirectURI, verifier string,
+	tokenURL, code, redirectURI, verifier, state string,
 ) (*oauth.Token, error) {
-	return requestToken(ctx, spec, tokenURL, url.Values{
+	vals := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {verifier},
-	})
+	}
+	if state != "" {
+		vals.Set("state", state)
+	}
+	return requestToken(ctx, spec, tokenURL, vals)
 }
 
 // authorizeValues seeds the parameters shared by the browser and device
@@ -207,10 +217,9 @@ func authorizeValues(spec *oauth.AuthSpec) url.Values {
 	return vals
 }
 
-// requestToken posts a form-encoded grant to the token endpoint and
-// decodes the response into an [oauth.Token]. Failures are reported as
-// *oauth.TokenExchangeError so callers can tell a revoked refresh token
-// from a transient error.
+// requestToken posts a grant to the token endpoint and decodes the response
+// into an [oauth.Token]. Failures are reported as *oauth.TokenExchangeError
+// so callers can tell a revoked refresh token from a transient error.
 func requestToken(ctx context.Context, spec *oauth.AuthSpec, tokenURL string, vals url.Values) (*oauth.Token, error) {
 	var tr struct {
 		AccessToken  string `json:"access_token"`
@@ -250,17 +259,43 @@ func postForm(ctx context.Context, spec *oauth.AuthSpec, endpoint string, vals u
 		vals.Set("client_secret", spec.ClientSecret)
 	}
 
+	payload := vals.Encode()
+	contentType := "application/x-www-form-urlencoded"
+	if spec.UsesJSONToken() {
+		// A JSON endpoint expects the request fields as an object, with the
+		// grant's fields in their plain (unencoded) shape.
+		object := make(map[string]any, len(vals))
+		for key, values := range vals {
+			if len(values) > 0 {
+				object[key] = values[0]
+			}
+		}
+		encoded, err := json.Marshal(object)
+		if err != nil {
+			return err
+		}
+		payload = string(encoded)
+		contentType = "application/json"
+	}
+
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
 		endpoint,
-		strings.NewReader(vals.Encode()),
+		strings.NewReader(payload),
 	)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
+	// Declared headers win: they are how a server that gates on client
+	// identity is satisfied.
+	for key, value := range spec.TokenHeaders {
+		if value != "" {
+			req.Header.Set(key, value)
+		}
+	}
 	if spec.ClientSecret != "" && spec.ClientSecretBasic {
 		req.SetBasicAuth(spec.ClientID, spec.ClientSecret)
 	}

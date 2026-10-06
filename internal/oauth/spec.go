@@ -60,6 +60,18 @@ type AuthSpec struct {
 	// provider-specific parameters such as audience or prompt.
 	ExtraParams map[string]string `json:"extra_params,omitempty" jsonschema:"description=Extra parameters added to the authorization request"`
 
+	// TokenHeaders are sent on every call to the token endpoint (exchange,
+	// refresh, and device polling). Some authorization servers only answer a
+	// request that identifies the client they know, so a plugin declares the
+	// headers it demands instead of Crush hardcoding any provider's.
+	TokenHeaders map[string]string `json:"token_headers,omitempty" jsonschema:"description=HTTP headers sent to the token endpoint"`
+
+	// TokenEncoding is how the token endpoint receives its request:
+	// "form" (the RFC 6749 default) or "json". A server that takes JSON
+	// also expects the authorization-code exchange to carry the flow's
+	// state, which Crush adds.
+	TokenEncoding string `json:"token_encoding,omitempty" jsonschema:"description=How token requests are encoded,form or json,default=form"`
+
 	// ClientSecretBasic sends client credentials with HTTP Basic auth
 	// instead of in the request body, as some authorization servers
 	// require.
@@ -73,6 +85,11 @@ func (s *AuthSpec) UsesOAuth() bool {
 		return false
 	}
 	return s.Kind == "" || strings.EqualFold(s.Kind, AuthKindOAuth)
+}
+
+// UsesJSONToken reports whether the token endpoint takes JSON bodies.
+func (s *AuthSpec) UsesJSONToken() bool {
+	return s != nil && strings.EqualFold(s.TokenEncoding, "json")
 }
 
 // FlowMode returns the normalized flow mode: auto, browser, or device.

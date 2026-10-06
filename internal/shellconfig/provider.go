@@ -79,6 +79,9 @@ var providerAddFlags = []flagSpec{
 	{name: "--oauth-callback-port", child: "auth", jsonKey: "callback_port", kind: flagInt, op: opSetChildValue},
 	{name: "--oauth-param", child: "auth.extra_params", kind: flagKeyValue, op: opSetChild},
 	{name: "--oauth-secret-basic", child: "auth", jsonKey: "client_secret_basic", kind: flagBool, op: opSetChildValue},
+	{name: "--oauth-token-header", child: "auth.token_headers", kind: flagKeyValue, op: opSetChild},
+	{name: "--oauth-token-encoding", child: "auth", jsonKey: "token_encoding", kind: flagString, op: opSetChildValue,
+		validate: oneOf("--oauth-token-encoding", "form", "json")},
 	// Quota reporting. These declare where the provider reports the allowance
 	// left on a subscription plan, which `crush usage` then reads.
 	{name: "--usage-url", child: "usage", jsonKey: "url", kind: flagString, op: opSetChildValue},

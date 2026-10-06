@@ -569,12 +569,14 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 				}
 				*field = resolved
 			}
-			for k, v := range auth.ExtraParams {
-				resolved, err := resolver.ResolveValue(v)
-				if err != nil {
-					return fmt.Errorf("resolving provider %s OAuth param %q: %w", id, k, err)
+			for _, values := range []map[string]string{auth.ExtraParams, auth.TokenHeaders} {
+				for k, v := range values {
+					resolved, err := resolver.ResolveValue(v)
+					if err != nil {
+						return fmt.Errorf("resolving provider %s OAuth value %q: %w", id, k, err)
+					}
+					values[k] = resolved
 				}
-				auth.ExtraParams[k] = resolved
 			}
 		}
 

@@ -172,6 +172,8 @@ Flags:
       --oauth-callback-port int     loopback port for the browser flow
       --oauth-param key value       extra authorization parameter (repeatable)
       --oauth-secret-basic bool     send the client secret with HTTP Basic auth
+      --oauth-token-header key value  header sent to the token endpoint (repeatable)
+      --oauth-token-encoding string  form or json (default form)
       --usage-url URL               endpoint reporting the quota left
       --usage-method string         HTTP method for the quota call (default GET)
       --usage-body JSON             request body for the quota call (default {})
@@ -245,6 +247,22 @@ parameter such as `audience` are covered by `--oauth-redirect-uri`,
 `--oauth-auth-url`/`--oauth-token-url`/`--oauth-device-url`, and
 `--oauth-param`. Confidential clients whose server expects HTTP Basic auth
 set `--oauth-secret-basic true`.
+
+Some token endpoints only answer a request identifying the client they know,
+down to its User-Agent, and reject anything else with an opaque "invalid
+request format". `--oauth-token-header KEY VALUE` (repeatable) declares the
+headers those calls carry, so the plugin supplies the identity rather than
+Crush. A server that takes JSON bodies instead of the RFC 6749 form encoding
+sets `--oauth-token-encoding json`; with JSON, the authorization-code exchange
+also carries the flow's state, which those servers expect:
+
+```bash
+provider add example-sub \
+  --type openai-compat \
+  --base-url "https://api.example.com/v1" \
+  --oauth-token-header User-Agent "example-cli/2.1.0" \
+  --oauth-token-encoding json
+```
 
 The equivalent JSON lives under the provider's `auth` object:
 

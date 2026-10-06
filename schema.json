@@ -105,6 +105,18 @@
           "type": "object",
           "description": "Extra parameters added to the authorization request"
         },
+        "token_headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "HTTP headers sent to the token endpoint"
+        },
+        "token_encoding": {
+          "type": "string",
+          "description": "How token requests are encoded",
+          "default": "form"
+        },
         "client_secret_basic": {
           "type": "boolean",
           "description": "Send client credentials using HTTP Basic auth instead of in the request body"

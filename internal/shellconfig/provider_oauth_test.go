@@ -45,6 +45,24 @@ func TestProviderOAuthFlags(t *testing.T) {
 	require.Equal(t, []any{"openid", "offline_access"}, scopes)
 }
 
+// A provider whose token endpoint only answers a request identifying the
+// client declares the headers it demands; the declaration is what keeps
+// Crush from hardcoding any provider's identity.
+func TestProviderOAuthTokenHeaders(t *testing.T) {
+	t.Parallel()
+
+	result := loadScript(t, `provider add example \
+  --oauth-token-url "https://auth.example.com/token" \
+  --oauth-token-header User-Agent "example-cli/2.1.0" \
+  --oauth-token-header X-Client "crush"`)
+
+	auth := result["providers"].(map[string]any)["example"].(map[string]any)["auth"].(map[string]any)
+	require.Equal(t, map[string]any{
+		"User-Agent": "example-cli/2.1.0",
+		"X-Client":   "crush",
+	}, auth["token_headers"].(map[string]any))
+}
+
 func TestProviderOAuthFlagsAccumulate(t *testing.T) {
 	t.Parallel()
 

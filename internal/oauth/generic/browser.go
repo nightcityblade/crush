@@ -225,7 +225,7 @@ func (f *BrowserFlow) exchange(ctx context.Context, code string) (*oauth.Token, 
 		}
 		f.endpoints = endpoints
 	}
-	token, err := ExchangeCode(ctx, f.spec, f.endpoints.TokenURL, code, f.redirectURI, f.verifier)
+	token, err := ExchangeCode(ctx, f.spec, f.endpoints.TokenURL, code, f.redirectURI, f.verifier, f.state)
 	if err != nil {
 		return nil, fmt.Errorf("exchange authorization code: %w", err)
 	}

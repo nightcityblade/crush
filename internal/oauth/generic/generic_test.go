@@ -3,8 +3,10 @@ package generic
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -64,17 +66,25 @@ func TestResolveWithoutEndpointsOrIssuerFails(t *testing.T) {
 func TestRefreshToken(t *testing.T) {
 	t.Parallel()
 
-	var form url.Values
+	var (
+		form url.Values
+		ua   string
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.NoError(t, r.ParseForm())
 		form = r.PostForm
+		ua = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "application/json")
 		// No refresh_token in the response: the previous one is kept.
 		fmt.Fprint(w, `{"access_token":"fresh","expires_in":3600}`)
 	}))
 	defer server.Close()
 
-	spec := &oauth.AuthSpec{ClientID: "crush", TokenURL: server.URL + "/token"}
+	spec := &oauth.AuthSpec{
+		ClientID:     "crush",
+		TokenURL:     server.URL + "/token",
+		TokenHeaders: map[string]string{"User-Agent": "example-cli/2.1.0"},
+	}
 	token, err := RefreshToken(context.Background(), spec, "old-refresh")
 	require.NoError(t, err)
 	require.Equal(t, "fresh", token.AccessToken)
@@ -82,6 +92,9 @@ func TestRefreshToken(t *testing.T) {
 	require.Equal(t, "refresh_token", form.Get("grant_type"))
 	require.Equal(t, "old-refresh", form.Get("refresh_token"))
 	require.Equal(t, "crush", form.Get("client_id"))
+	// Declared headers ride on the token call; some servers only answer a
+	// request identifying the client they know.
+	require.Equal(t, "example-cli/2.1.0", ua)
 }
 
 // A provider that returns an ID token labels the signed-in account, which is
@@ -497,4 +510,48 @@ func TestBrowserFlowAcceptsAbsentState(t *testing.T) {
 	token, err := flow.Wait(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "fresh", token.AccessToken)
+}
+
+// A JSON token endpoint gets an object body with the flow's state, which is
+// how the servers behind that shape check the exchange belongs to the
+// authorization request.
+func TestJSONTokenEncoding(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotCT    string
+		received map[string]any
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCT = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &received)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"access_token":"fresh","refresh_token":"rt","expires_in":3600}`)
+	}))
+	defer server.Close()
+
+	spec := &oauth.AuthSpec{
+		ClientID:      "crush",
+		TokenURL:      server.URL + "/token",
+		TokenEncoding: "json",
+		Scopes:        []string{"user:inference", "user:profile"},
+	}
+	_, err := ExchangeCode(context.Background(), spec, spec.TokenURL, "the-code",
+		"http://localhost:54545/callback", "the-verifier", "the-state")
+	require.NoError(t, err)
+
+	require.Equal(t, "application/json", gotCT)
+	require.Equal(t, "authorization_code", received["grant_type"])
+	require.Equal(t, "the-code", received["code"])
+	require.Equal(t, "the-state", received["state"])
+	require.Equal(t, "the-verifier", received["code_verifier"])
+	require.Equal(t, "crush", received["client_id"])
+
+	// A refresh against the same endpoint re-sends the declared scopes.
+	received = nil
+	_, err = RefreshToken(context.Background(), spec, "rt")
+	require.NoError(t, err)
+	require.Equal(t, "refresh_token", received["grant_type"])
+	require.Equal(t, "user:inference user:profile", received["scope"])
 }
